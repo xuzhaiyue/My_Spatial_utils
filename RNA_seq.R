@@ -32,10 +32,10 @@ read_excel_all_sheets <- function(path, id_column = "Sheet_Source") {
   return(final_df)
 }
 Plot_ViolinPub <- function(
-    df,                       # long table with columns: sample, lr_pair, group, y
+    df,                       
     mode = c("panel", "merged", "stratified"),
     sample_levels = c("HDA1","HDD1","HDD2"),
-    lr_levels = NULL,         # default: names(lr_pairs)
+    lr_levels = NULL,         
     point_n = 3000,
     seed = 123,
     fill_colors = c("Non_ECM" = "#8DA0CB", "ECM_Hotspot" = "#FC8D62"),
@@ -45,11 +45,11 @@ Plot_ViolinPub <- function(
 ) {
   mode <- match.arg(mode)
   
-  # ---- 0) Sanity ----
+  # ---- 0) Sanity Check ----
   stopifnot(is.data.frame(df))
   need <- c("sample","lr_pair","group","y")
   miss <- setdiff(need, colnames(df))
-  if (length(miss) > 0) stop("df missing: ", paste(miss, collapse = ", "))
+  if (length(miss) > 0) stop("df missing columns: ", paste(miss, collapse = ", "))
   
   df_plot <- df |>
     dplyr::mutate(
@@ -64,17 +64,20 @@ Plot_ViolinPub <- function(
     df_plot <- df_plot |> dplyr::mutate(lr_pair = factor(lr_pair))
   }
   
-  # ---- 1) Downsample points only (keep stats on full data) ----
+  # ---- 1) Downsample points only (修复了这里的报错) ----
   set.seed(seed)
+  
   if (mode == "panel") {
     df_points <- df_plot |>
       dplyr::group_by(sample, lr_pair, group) |>
-      dplyr::slice_sample(n = min(point_n, dplyr::n())) |>
+      # 【修复】直接使用 n = point_n，dplyr 会自动处理行数不足的情况
+      dplyr::slice_sample(n = point_n) |> 
       dplyr::ungroup()
   } else {
     df_points <- df_plot |>
       dplyr::group_by(lr_pair, group) |>
-      dplyr::slice_sample(n = min(point_n, dplyr::n())) |>
+      # 【修复】直接使用 n = point_n
+      dplyr::slice_sample(n = point_n) |> 
       dplyr::ungroup()
   }
   
@@ -136,7 +139,7 @@ Plot_ViolinPub <- function(
       )
     
   } else {
-    # Stratified across samples (van Elteren): more rigorous than pooling
+    # Stratified (coin package)
     if (!requireNamespace("coin", quietly = TRUE)) {
       stop("mode='stratified' requires package 'coin'. install.packages('coin')")
     }
@@ -144,9 +147,16 @@ Plot_ViolinPub <- function(
     stat_tbl <- lapply(levels(df_plot$lr_pair), function(pair) {
       sub <- df_plot[df_plot$lr_pair == pair, , drop = FALSE]
       sub$group <- factor(sub$group, levels = c("Non_ECM","ECM_Hotspot"))
-      p <- coin::pvalue(
-        coin::wilcox_test(y ~ group | sample, data = sub, distribution = "asymptotic")
+      # Coin check: if strictly one group level, cannot test
+      if (length(unique(sub$group)) < 2) return(NULL)
+      
+      p <- tryCatch(
+        coin::pvalue(coin::wilcox_test(y ~ group | sample, data = sub, distribution = "asymptotic")),
+        error = function(e) NA_real_
       )
+      
+      if (is.na(p)) return(NULL)
+      
       data.frame(
         lr_pair = pair,
         p = as.numeric(p),
@@ -172,7 +182,7 @@ Plot_ViolinPub <- function(
     stat_anno <- stat_tbl
   }
   
-  # ---- 3) Plot (keep your style) ----
+  # ---- 3) Plot ----
   p <- ggplot2::ggplot(df_plot, ggplot2::aes(x = group, y = y)) +
     ggplot2::geom_jitter(
       data = df_points,
@@ -219,6 +229,7 @@ Plot_ViolinPub <- function(
   attr(p, "stat_table") <- stat_tbl
   return(p)
 }
+        
 library(dplyr)
 library(ggplot2)
 library(ggpubr)
@@ -11309,6 +11320,7 @@ score_kras_resistance <- function(expr, signature_df,
   }
   out
 }
+
 
 
 
