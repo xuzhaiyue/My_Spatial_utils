@@ -219,7 +219,117 @@ Plot_ViolinPub <- function(
   attr(p, "stat_table") <- stat_tbl
   return(p)
 }
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
 
+#' 绘制 Nature 风格的小提琴图 + 统计显著性标注
+#'
+#' @param data 绘图用的长格式数据 (dataframe)
+#' @param stat_data 统计检验结果 (dataframe, 需包含 p.adj, group1, group2, y.position)
+#' @param x_col X轴列名 (字符串, e.g. "TAM_Subtype")
+#' @param y_col Y轴数值列名 (字符串, e.g. "dist_um")
+#' @param fill_col 填充颜色列名 (字符串, 通常同 x_col)
+#' @param facet_formula 分面公式 (formula, e.g. metric ~ sample)
+#' @param palette 颜色向量 (named vector)
+#' @param y_expand_mult Y轴顶部预留空间的倍数 (默认 0.18，用于放星号)
+#' @param save_path (可选) 保存 PDF 的完整路径。如果为 NULL 则不保存。
+#' @param width 保存宽度 (默认 6)
+#' @param height 保存高度 (默认 5.2)
+#'
+#' @return ggplot 对象
+plot_nature_violin <- function(
+    data, 
+    stat_data, 
+    x_col, 
+    y_col, 
+    fill_col, 
+    facet_formula = NULL, 
+    palette = NULL, 
+    y_expand_mult = 0.18,
+    save_path = NULL,
+    width = 6, 
+    height = 5.2
+) {
+  
+  # 1. 预处理：给统计表添加星号列 (p_star)
+  # 确保 stat_data 只有在该列存在时才处理，避免重复
+  stat_data_plot <- stat_data %>%
+    mutate(
+      p_star = case_when(
+        p.adj <= 1e-4 ~ "****",
+        p.adj <= 1e-3 ~ "***",
+        p.adj <= 1e-2 ~ "**",
+        p.adj <= 5e-2 ~ "*",
+        TRUE          ~ "ns"
+      )
+    )
+  
+  # 2. 确保 x 轴是因子 (保持顺序)
+  # 如果传入的数据中该列已经是因子，则保留；否则转为因子
+  if (!is.factor(data[[x_col]])) {
+    data[[x_col]] <- as.factor(data[[x_col]])
+  }
+  
+  # 3. 绘图核心
+  p <- ggplot(data, aes(x = .data[[x_col]], y = .data[[y_col]], fill = .data[[fill_col]])) +
+    # 小提琴层
+    geom_violin(trim = FALSE, scale = "width", color = NA, alpha = 0.90) +
+    # 箱线图层 (细长风格)
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.55,
+                 color = "grey15", size = 0.35) +
+    # 中位数点
+    stat_summary(fun = median, geom = "point", size = 1.4, color = "black") +
+    
+    # 颜色
+    scale_fill_manual(values = palette) +
+    
+    # Y轴扩展 (防止星号被切)
+    scale_y_continuous(expand = expansion(mult = c(0.02, y_expand_mult))) +
+    
+    # 统计显著性层
+    stat_pvalue_manual(
+      stat_data_plot,
+      label = "p_star",
+      xmin = "group1", # rstatix 默认列名
+      xmax = "group2", # rstatix 默认列名
+      y.position = "y.position", # 必须确保 stat_data 里有这列
+      tip.length = 0.01,
+      bracket.size = 0.35,
+      size = 4.2,
+      hide.ns = FALSE   # 是否隐藏 ns，可根据需求改为 TRUE
+    ) +
+    
+    # 坐标轴与主题
+    labs(x = NULL, y = NULL) +
+    theme_classic(base_size = 12) +
+    theme(
+      legend.position = "none",
+      strip.background = element_rect(fill = "grey95", color = NA),
+      strip.text = element_text(face = "bold", size = 10),
+      axis.text.x = element_text(color = "black", face = "bold", size = 10),
+      axis.text.y = element_text(color = "black"),
+      panel.grid = element_blank()
+    )
+  
+  # 4. 处理分面 (如果有)
+  if (!is.null(facet_formula)) {
+    p <- p + facet_grid(facet_formula, scales = "free_y")
+  }
+  
+  # 5. 保存逻辑
+  if (!is.null(save_path)) {
+    # 自动创建目录 (如果不存在)
+    dir_name <- dirname(save_path)
+    if (!dir.exists(dir_name)) dir.create(dir_name, recursive = TRUE)
+    
+    ggsave(save_path, plot = p, width = width, height = height, dpi = 600, useDingbats = FALSE)
+    message("Plot saved to: ", save_path)
+  }
+  
+  return(p)
+}
 plot_gene_boxplot <- function(expr_mat, 
                               meta_data, 
                               genes, 
@@ -11199,6 +11309,7 @@ score_kras_resistance <- function(expr, signature_df,
   }
   out
 }
+
 
 
 
