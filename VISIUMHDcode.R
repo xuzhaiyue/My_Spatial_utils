@@ -13872,21 +13872,18 @@ library(Matrix)
 library(dbscan)
 library(ggplot2)
 library(viridis)
-
 Plot_Spatial_LR <- function(
     object,
     ligand,
     receptor,
     radius_um = 50,
-    outline_floor = 0.15,   # 稍微提高一点底噪值，确保轮廓更实
+    outline_floor = 0.15,   
     save_path = NULL,
     ...
 ) {
-  # --- 1. 获取数据 ---
-  # 兼容 V5 的 JoinLayers 逻辑，防止数据拿不到
+  # --- 1. 获取数据 (保持不变) ---
   if ("Spatial" %in% names(object@assays)) {
     DefaultAssay(object) <- "Spatial"
-    # 尝试获取 data 层，如果为空则尝试 counts
     mat <- tryCatch(
       Seurat::GetAssayData(object, assay = "Spatial", layer = "data"),
       error = function(e) Seurat::GetAssayData(object, assay = "Spatial", slot = "data")
@@ -13903,7 +13900,7 @@ Plot_Spatial_LR <- function(
   expr_L <- as.numeric(mat[ligand, ])
   expr_R <- as.numeric(mat[receptor, ])
   
-  # --- 2. 坐标 & 物理尺度 ---
+  # --- 2. 坐标 & 物理尺度 (保持不变) ---
   md <- object@meta.data
   if (all(c("imagecol_scaled","imagerow_scaled") %in% colnames(md))) {
     coords <- cbind(md$imagecol_scaled, md$imagerow_scaled)
@@ -13922,7 +13919,6 @@ Plot_Spatial_LR <- function(
     (x - rng[1]) / (rng[2] - rng[1])
   }
   
-  # 尝试获取物理分辨率
   mpp <- object@misc$microns_per_pixel %||%
     object@misc$spatial_scales$microns_per_pixel %||%
     object@misc$scales$microns_per_pixel %||%
@@ -13938,7 +13934,6 @@ Plot_Spatial_LR <- function(
   }
   mpp <- as.numeric(mpp)
   
-  # 计算像素半径
   if (identical(coord_source, "scaled") && !is.null(s_low) && is.finite(as.numeric(s_low))) {
     radius_px <- radius_um * as.numeric(s_low) / mpp
   } else {
@@ -13946,7 +13941,7 @@ Plot_Spatial_LR <- function(
   }
   message(sprintf(">>> Calculating LR Score: %s-%s (Radius: %.1f µm ≈ %.1f px)", ligand, receptor, radius_um, radius_px))
   
-  # --- 3. 空间平滑 (矩阵加速版) ---
+  # --- 3. 空间平滑 (保持不变) ---
   nn <- dbscan::frNN(coords, eps = radius_px)
   ids  <- nn$id
   lens <- lengths(ids)
@@ -13957,7 +13952,6 @@ Plot_Spatial_LR <- function(
   j_idx <- unlist(ids[valid])
   
   total_cells <- ncol(object)
-  # 加入自环 (Self-loop)
   i_idx <- c(i_idx, seq_len(total_cells))
   j_idx <- c(j_idx, seq_len(total_cells))
   
@@ -13965,11 +13959,9 @@ Plot_Spatial_LR <- function(
   rs <- Matrix::rowSums(W); rs[rs == 0] <- 1
   W <- W / rs
   
-  # 计算平滑表达量
   L_smooth <- as.numeric(W %*% expr_L)
   R_smooth <- as.numeric(W %*% expr_R)
   
-  # 归一化后相乘
   L_s <- .scale01(L_smooth)
   R_s <- .scale01(R_smooth)
   
@@ -13977,7 +13969,7 @@ Plot_Spatial_LR <- function(
   score_raw[!is.finite(score_raw)] <- 0
   score_pos <- pmax(score_raw, 0)
   
-  # --- 4. 高值截断 (Top 0.5%) ---
+  # --- 4. 高值截断 (保持不变) ---
   q_hi <- stats::quantile(score_pos[score_pos > 0], probs = 0.995, na.rm = TRUE)
   if (!is.finite(q_hi) || q_hi <= 0) {
     score_scaled <- score_pos
@@ -13986,28 +13978,29 @@ Plot_Spatial_LR <- function(
   }
   score_scaled[!is.finite(score_scaled)] <- 0
   
-  # --- 5. 视觉增强处理 ---
-  # outline_floor 决定了非热点区域的“底色亮度”
+  ### 【新增】这里把算好的分数存下来，为了之后的小提琴图
+  ### 我们使用 score_scaled，因为它是 0-1 之间归一化好的数值，最适合统计
+  result_data <- data.frame(
+    cell_id = colnames(object),
+    Interaction_Score = score_scaled  # 这就是 L_smooth * R_smooth 归一化后的结果
+  )
+  
+  # --- 5. 视觉增强处理 (保持不变) ---
   outline_floor <- max(0, min(0.4, outline_floor)) 
   
   score_vis <- ifelse(
-    score_scaled > 0.01, # 只有真正有分数的点才参与渐变
+    score_scaled > 0.01, 
     outline_floor + (1 - outline_floor) * score_scaled,
-    outline_floor # 背景点设为地板值
+    outline_floor 
   )
   
   feature_name_vis <- paste0("LR_", ligand, "_", receptor, "_vis")
   object[[feature_name_vis]] <- score_vis
   
-  # --- 6. 调色板修改 (关键步骤) ---
-  # 第一个颜色改为 grey25，这样在纯黑背景下能看到深灰色的组织轮廓
-  dark_palette <- c(
-    "grey25",           # <--- 背景轮廓色 (可见的深灰)
-    viridis::magma(50)  # <--- 热点渐变色 (紫-红-黄-白)
-  )
+  # --- 6. 调色板修改 (保持不变) ---
+  dark_palette <- c("grey25", viridis::magma(50))
   
-  # --- 7. 绘图 ---
-  # 假设 PlotExpressionV3 是您环境中的辅助函数
+  # --- 7. 绘图 (保持不变) ---
   p <- PlotExpressionV3(
     object      = object,
     feature     = feature_name_vis,
@@ -14019,7 +14012,6 @@ Plot_Spatial_LR <- function(
     ...
   )
   
-  # 黑色主题美化
   p <- p +
     theme(
       plot.background   = element_rect(fill = "black", color = "black"),
@@ -14040,17 +14032,14 @@ Plot_Spatial_LR <- function(
       subtitle = "Smoothed Interaction (Dark Mode)"
     )
   
-  # 保存
   if (!is.null(save_path)) {
     ggsave(save_path, p, width = 6, height = 6, dpi = 600)
     message("Plot saved to: ", save_path)
   }
   
-  return(p)
+  ### 【修改】最后一行：原本是 return(p)，现在改为返回一个列表
+  return(list(plot = p, data = result_data))
 }
-
-
-
 
 library(liana)
 library(dplyr)
@@ -15566,4 +15555,5 @@ calc_cell_distances_multi <- function(
     calc_cell_distances(obj = obj_list[[sid]], sample_name = sid, ...)
   }))
 }
+
 
