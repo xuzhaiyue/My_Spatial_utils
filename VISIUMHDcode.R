@@ -15373,3 +15373,197 @@ RunLR_liana <- function(
     return(list(raw_results = res_list, combined_df = all_res, summary_df = summary_df))
   }
 }
+
+
+
+
+               suppressPackageStartupMessages({
+  library(tidyverse)
+  library(RANN)
+  library(Seurat)
+})
+
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# ==============================================================================
+# 1) Robust: get coords + um_per_unit (strict, but compatible with your objects)
+# ==============================================================================
+get_coords_and_um_per_unit_strict <- function(obj, use_scaled = TRUE) {
+  md <- obj@meta.data
+
+  has_scaled <- all(c("imagecol_scaled", "imagerow_scaled") %in% colnames(md))
+  has_raw    <- all(c("imagecol", "imagerow") %in% colnames(md))
+
+  # --- coords ---
+  if (use_scaled && has_scaled) {
+    coords <- cbind(md$imagecol_scaled, md$imagerow_scaled)
+    coord_source <- "scaled"
+  } else if (has_raw) {
+    coords <- cbind(md$imagecol, md$imagerow)
+    coord_source <- "raw"
+  } else {
+    stop("[Error] No spatial coords found in meta.data (need imagecol/imagerow or *_scaled).")
+  }
+  rownames(coords) <- rownames(md)
+
+  # --- microns_per_pixel (fullres) ---
+  mpp_full <- obj@misc$microns_per_pixel %||%
+    obj@misc$spatial_scales$microns_per_pixel %||%
+    obj@misc$scales$microns_per_pixel %||%
+    tryCatch(Images(obj)[[1]]@scale.factors$microns_per_pixel, error = function(e) NULL) %||%
+    md$microns_per_pixel[1] %||%
+    NULL
+
+  if (is.null(mpp_full) || !is.finite(as.numeric(mpp_full))) {
+    stop(paste0(
+      "\n[Error] microns_per_pixel not found.\n",
+      "Checked: obj@misc$microns_per_pixel / obj@misc$scales$microns_per_pixel / ",
+      "obj@misc$spatial_scales$microns_per_pixel / Images(obj)[[1]]@scale.factors.\n",
+      "Stop to avoid wrong physical distances."
+    ))
+  }
+  mpp_full <- as.numeric(mpp_full)
+
+  # --- scale factor for lowres ---
+  if (coord_source == "scaled") {
+    s_low <- obj@misc$spatial_scales$tissue_lowres_scalef %||%
+      obj@misc$scales$tissue_lowres_scalef %||%
+      tryCatch(Images(obj)[[1]]@scale.factors$tissue_lowres_scalef, error = function(e) NULL) %||%
+      NULL
+
+    # Optional fallback: estimate from hires vs scaled if present
+    if ((is.null(s_low) || !is.finite(as.numeric(s_low))) &&
+        all(c("imagecol_hires","imagecol_scaled") %in% colnames(md))) {
+      ratio <- md$imagecol_scaled / md$imagecol_hires
+      ratio <- ratio[is.finite(ratio) & ratio > 0]
+      if (length(ratio) > 100) s_low <- median(ratio, na.rm = TRUE)
+    }
+
+    if (is.null(s_low) || !is.finite(as.numeric(s_low)) || as.numeric(s_low) <= 0) {
+      stop("[Error] Using scaled coords but tissue_lowres_scalef not found/invalid.")
+    }
+    s_low <- as.numeric(s_low)
+
+    # um per coordinate unit in scaled space
+    um_per_unit <- mpp_full / s_low
+  } else {
+    # raw coords are usually in the same pixel space as mpp_full
+    um_per_unit <- mpp_full
+  }
+
+  list(coords = coords, um_per_unit = um_per_unit, coord_source = coord_source)
+}
+
+# ==============================================================================
+# 2) NN distance in microns with proper self-exclusion (when overlap happens)
+# ==============================================================================
+nn_dist_um_k1_or_k2 <- function(query_ids, query_coords, ref_ids, ref_coords, um_per_unit) {
+  if (nrow(query_coords) == 0 || nrow(ref_coords) == 0) {
+    return(rep(NA_real_, length(query_ids)))
+  }
+
+  # If any query is also in ref, we should use k=2 and skip self for those cells.
+  overlap <- query_ids %in% ref_ids
+  need_k2 <- any(overlap)
+
+  if (!need_k2) {
+    nn <- RANN::nn2(data = ref_coords, query = query_coords, k = 1)
+    return(as.numeric(nn$nn.dists[, 1]) * um_per_unit)
+  }
+
+  # If ref has <2 points, cannot skip self properly.
+  if (nrow(ref_coords) < 2) {
+    return(rep(NA_real_, length(query_ids)))
+  }
+
+  nn <- RANN::nn2(data = ref_coords, query = query_coords, k = 2)
+  idx1 <- nn$nn.idx[, 1]
+  idx2 <- nn$nn.idx[, 2]
+  d1   <- nn$nn.dists[, 1]
+  d2   <- nn$nn.dists[, 2]
+
+  ref_ids_ordered <- rownames(ref_coords)
+
+  nn1_id <- ref_ids_ordered[idx1]
+  use_d  <- ifelse(nn1_id == query_ids, d2, d1)
+
+  as.numeric(use_d) * um_per_unit
+}
+
+# ==============================================================================
+# 3) Main: generic distance table (Query -> multiple References)
+# ==============================================================================
+calc_cell_distances <- function(
+  obj,
+  sample_name,
+  label_col,
+  query_idents,
+  ref_idents_list,
+  use_scaled = TRUE
+) {
+  md <- obj@meta.data
+  if (!(label_col %in% colnames(md))) stop("label_col not found in meta.data: ", label_col)
+  if (!is.list(ref_idents_list) || is.null(names(ref_idents_list))) {
+    stop("ref_idents_list must be a *named* list, e.g. list(Basal='Basal-like', CAF=c('myCAF','iCAF')).")
+  }
+
+  info <- get_coords_and_um_per_unit_strict(obj, use_scaled = use_scaled)
+  coords <- info$coords
+  um_per_unit <- info$um_per_unit
+
+  labs <- as.character(md[[label_col]])
+  names(labs) <- rownames(md)
+
+  query_cells <- rownames(md)[labs %in% query_idents]
+  if (length(query_cells) == 0) {
+    warning(sample_name, ": no Query cells found for query_idents.")
+    return(NULL)
+  }
+
+  res <- tibble::tibble(
+    sample   = sample_name,
+    cell_id  = query_cells,
+    cell_type = labs[query_cells]
+  )
+
+  q_coords <- coords[query_cells, , drop = FALSE]
+
+  for (ref_name in names(ref_idents_list)) {
+    target_types <- ref_idents_list[[ref_name]]
+    ref_cells <- rownames(md)[labs %in% target_types]
+
+    col_name <- paste0("dist_to_", ref_name, "_um")
+
+    if (length(ref_cells) == 0) {
+      res[[col_name]] <- NA_real_
+      next
+    }
+
+    r_coords <- coords[ref_cells, , drop = FALSE]
+    rownames(r_coords) <- ref_cells
+
+    res[[col_name]] <- nn_dist_um_k1_or_k2(
+      query_ids    = query_cells,
+      query_coords = q_coords,
+      ref_ids      = ref_cells,
+      ref_coords   = r_coords,
+      um_per_unit  = um_per_unit
+    )
+  }
+
+  res
+}
+
+# ==============================================================================
+# 4) Wrapper: multiple samples -> one table
+# ==============================================================================
+calc_cell_distances_multi <- function(
+  obj_list,
+  sample_order = names(obj_list),
+  ...
+) {
+  dplyr::bind_rows(lapply(sample_order, function(sid) {
+    calc_cell_distances(obj = obj_list[[sid]], sample_name = sid, ...)
+  }))
+}
+
