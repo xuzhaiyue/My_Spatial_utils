@@ -229,7 +229,108 @@ Plot_ViolinPub <- function(
   attr(p, "stat_table") <- stat_tbl
   return(p)
 }
-        
+
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+
+plot_nature_violin_v2 <- function(
+    data, 
+    stat_data, 
+    x_col, 
+    y_col, 
+    fill_col, 
+    facet_formula = NULL, 
+    palette = NULL, 
+    y_expand_mult = 0.18,
+    save_path = NULL,
+    width = 6, 
+    height = 5.2
+) {
+  
+  # 1. 预处理：给统计表添加星号列 (p_star)
+  stat_data_plot <- stat_data %>%
+    mutate(
+      p_star = case_when(
+        p.adj <= 1e-4 ~ "****",
+        p.adj <= 1e-3 ~ "***",
+        p.adj <= 1e-2 ~ "**",
+        p.adj <= 5e-2 ~ "*",
+        TRUE          ~ "ns"
+      )
+    )
+  
+  # 2. 确保 x 轴是因子
+  if (!is.factor(data[[x_col]])) {
+    data[[x_col]] <- as.factor(data[[x_col]])
+  }
+  
+  # 3. 绘图核心
+  p <- ggplot(data, aes(x = .data[[x_col]], y = .data[[y_col]], fill = .data[[fill_col]])) +
+    # 小提琴层
+    geom_violin(trim = FALSE, scale = "width", color = NA, alpha = 0.90) +
+    # 箱线图层
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.55,
+                 color = "grey15", size = 0.35) +
+    # 中位数点
+    stat_summary(fun = median, geom = "point", size = 1.4, color = "black") +
+    
+    # 颜色
+    scale_fill_manual(values = palette) +
+    
+    # 【修改点 1】：Y轴标尺移到右边 (position = "right")
+    scale_y_continuous(
+      expand = expansion(mult = c(0.02, y_expand_mult)),
+      position = "right" 
+    ) +
+    
+    # 统计显著性层
+    stat_pvalue_manual(
+      stat_data_plot,
+      label = "p_star",
+      xmin = "group1", 
+      xmax = "group2",
+      y.position = "y.position",
+      tip.length = 0.01,
+      bracket.size = 0.35,
+      size = 4.2,
+      hide.ns = FALSE 
+    ) +
+    
+    # 坐标轴与主题
+    labs(x = NULL, y = NULL) +
+    theme_classic(base_size = 12) +
+    theme(
+      legend.position = "none",
+      strip.background = element_rect(fill = "grey95", color = NA),
+      strip.text = element_text(face = "bold", size = 10),
+      # 确保左侧的分面标签和右侧的轴文字样式正确
+      axis.text.x = element_text(color = "black", face = "bold", size = 10),
+      axis.text.y = element_text(color = "black"), # 这里的 y 现在控制右边的数字
+      panel.grid = element_blank(),
+      # 让左侧的分面标签放在坐标轴线之外（看起来更像标题）
+      strip.placement = "outside" 
+    )
+  
+  # 4. 处理分面
+  if (!is.null(facet_formula)) {
+    # 【修改点 2】：分面标签移到左边 (switch = "y")
+    p <- p + facet_grid(facet_formula, scales = "free_y", switch = "y")
+  }
+  
+  # 5. 保存逻辑
+  if (!is.null(save_path)) {
+    dir_name <- dirname(save_path)
+    if (!dir.exists(dir_name)) dir.create(dir_name, recursive = TRUE)
+    
+    ggsave(save_path, plot = p, width = width, height = height, dpi = 600, useDingbats = FALSE)
+    message("Plot saved to: ", save_path)
+  }
+  
+  return(p)
+}
 library(dplyr)
 library(ggplot2)
 library(ggpubr)
@@ -11320,6 +11421,7 @@ score_kras_resistance <- function(expr, signature_df,
   }
   out
 }
+
 
 
 
