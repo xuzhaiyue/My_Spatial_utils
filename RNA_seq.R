@@ -8,6 +8,50 @@ library(ggpubr)
 library(dplyr)
 library(tidyr)
 library(ggsci) # 顶刊配色包
+# 修改你的 read_auc_sheet 函数，确保它能识别 "cellname"
+read_auc_sheet <- function(sheet_name) {
+  # 这里的 read_excel 需要的是字符串名称
+  dt <- as.data.table(read_excel(AUC_XLSX, sheet = sheet_name))
+  if (nrow(dt) == 0L) return(NULL)
+  
+  old <- names(dt)
+  new <- norm_names(old)
+  setnames(dt, old, new)
+  
+  # 1. 寻找样本列：加入了 "cellname"，因为你截图里显示的是这个名字
+  sample_candidates <- c("sample", "sample_id", "cellname", "cell_line", "model", "pdo")
+  sc <- intersect(sample_candidates, names(dt))
+  if (length(sc) == 0L) {
+    stop("Cannot find a sample id column in sheet: ", sheet_name,
+         "\nColumns: ", paste(names(dt), collapse = ", "))
+  }
+  sample_col <- sc[1]
+  setnames(dt, sample_col, "sample_id")
+  
+  # 2. 寻找 AUC 列
+  auc_candidates <- c("auc", "auc_mean", "relativeauc", "area_under_curve")
+  ac <- intersect(auc_candidates, names(dt))
+  
+  if (length(ac) > 0L) {
+    auc_col <- ac[1]
+  } else {
+    # Fallback: 找数值列
+    num_cols <- names(dt)[sapply(dt, is.numeric)]
+    num_cols <- setdiff(num_cols, "sample_id")
+    if (length(num_cols) == 0L) {
+      return(NULL) # 如果没数值列就跳过
+    }
+    auc_col <- num_cols[1]
+  }
+  
+  setnames(dt, auc_col, "AUC")
+  
+  # 3. 提取结果
+  dt[, drug := sheet_name]
+  dt <- dt[, .(sample_id, drug, AUC)]
+  return(dt)
+}
+
 read_excel_all_sheets <- function(path, id_column = "Sheet_Source") {
   # 1. 获取 Excel 中所有的 sheet 名称
   sheet_names <- readxl::excel_sheets(path)
@@ -11421,6 +11465,7 @@ score_kras_resistance <- function(expr, signature_df,
   }
   out
 }
+
 
 
 
