@@ -8,6 +8,110 @@ library(ggpubr)
 library(dplyr)
 library(tidyr)
 library(ggsci) # 顶刊配色包
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(RColorBrewer)
+
+#' 顶刊风格 Boxplot 通用绘图函数
+#'
+#' @param data 数据框 (data.table 或 data.frame)
+#' @param x 分组列名 (字符串, e.g. "dosage_grp")
+#' @param y 数值列名 (字符串, e.g. "AUC")
+#' @param id_col 样本ID列名 (字符串, e.g. "sample_id")。仅当 show_ids=TRUE 时需要。
+#' @param show_ids 是否显示样本ID (逻辑值 TRUE/FALSE)
+#' @param comparisons 两两比较的列表 (list, e.g. list(c("A","B")) )。若为 NULL 则不显示连线。
+#' @param title 主标题
+#' @param subtitle 副标题
+#' @param xlab X轴标签
+#' @param ylab Y轴标签
+#' @param colors 自定义颜色向量 (长度需与分组数一致)
+#' @param y_expand_ratio Y轴顶部留白比例 (默认 1.25，为 P 值留空间)
+#'
+#' @return ggplot 对象
+gg_boxplot_pub <- function(data, x, y, 
+                           id_col = "sample_id", 
+                           show_ids = FALSE, 
+                           comparisons = NULL,
+                           title = NULL, 
+                           subtitle = NULL, 
+                           xlab = NULL, 
+                           ylab = NULL,
+                           colors = c("#FEE0D2", "#FC9272", "#DE2D26"), # 默认红色渐变
+                           y_expand_ratio = 1.25) {
+  
+  # 1. 数据预处理
+  # 确保 X 轴是因子 (Factor)，保证顺序和颜色对应
+  if (!is.factor(data[[x]])) {
+    data[[x]] <- as.factor(data[[x]])
+  }
+  
+  # 计算 Y 轴上限，防止 P 值被切掉
+  max_y <- max(data[[y]], na.rm = TRUE)
+  y_limit <- max_y * y_expand_ratio
+  
+  # 2. 基础绘图
+  p <- ggplot(data, aes(x = .data[[x]], y = .data[[y]])) +
+    
+    # 箱线图 (主体)
+    geom_boxplot(aes(fill = .data[[x]]), 
+                 outlier.shape = NA,    # 隐藏自带异常点
+                 color = "black", 
+                 lwd = 0.6, width = 0.5, alpha = 0.9) +
+    
+    # 抖动散点 (显示真实分布，带黑边的实心点)
+    geom_jitter(color = "black", fill = "#4D4D4D", 
+                shape = 21, size = 2.5, stroke = 0.5,
+                width = 0.15, alpha = 0.7) +
+    
+    # 全局 K-W 检验 P 值 (显示在最上方)
+    stat_compare_means(label.y = max_y * (y_expand_ratio - 0.1), 
+                       label.x.npc = 0.5,
+                       size = 4, fontface = "italic") +
+    
+    # 3. 美化主题
+    scale_fill_manual(values = colors) +
+    scale_y_continuous(limits = c(0, y_limit), expand = c(0,0)) + 
+    theme_classic(base_size = 14) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+      plot.subtitle = element_text(hjust = 0.5, color = "gray30", size = 12),
+      axis.text = element_text(color = "black", size = 12),
+      axis.title = element_text(face = "bold", size = 13),
+      axis.line = element_line(linewidth = 0.8),
+      legend.position = "none"
+    ) +
+    labs(title = title, subtitle = subtitle, x = xlab, y = ylab)
+  
+  # 4. 可选：两两比较 (Pairwise)
+  if (!is.null(comparisons)) {
+    p <- p + stat_compare_means(comparisons = comparisons,
+                                method = "wilcox.test",
+                                label = "p.signif", # 只显示 *
+                                tip.length = 0.02,
+                                vjust = 0.5)
+  }
+  
+  # 5. 可选：显示样本 ID (智能避让)
+  if (show_ids) {
+    if (is.null(id_col) || !(id_col %in% names(data))) {
+      warning("Show IDs is TRUE but id_col not found in data.")
+    } else {
+      p <- p + geom_text_repel(
+        aes(label = .data[[id_col]]),
+        size = 3,
+        color = "gray20",
+        box.padding = 0.4,
+        point.padding = 0.3,
+        segment.color = "gray80",
+        max.overlaps = 30, # 允许更多标签重叠
+        force = 2
+      )
+    }
+  }
+  
+  return(p)
+}
 # 修改你的 read_auc_sheet 函数，确保它能识别 "cellname"
 read_auc_sheet <- function(sheet_name) {
   # 这里的 read_excel 需要的是字符串名称
@@ -11465,6 +11569,7 @@ score_kras_resistance <- function(expr, signature_df,
   }
   out
 }
+
 
 
 
