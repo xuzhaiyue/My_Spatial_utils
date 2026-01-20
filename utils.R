@@ -26,47 +26,82 @@ join_layers_if_needed <- function(obj, verbose = TRUE) {
   obj
 }
 
-calc_qc_metrics <- function(obj, species = "human", do_cellcycle = TRUE, verbose = TRUE) {
+calc_qc_metrics <- function(obj,
+                            species = "human",
+                            do_cellcycle = TRUE,
+                            force_recalc = FALSE,
+                            mt_pattern = NULL,
+                            rb_pattern = NULL,
+                            hb_pattern = NULL,
+                            verbose = TRUE) {
   stopifnot(inherits(obj, "Seurat"))
-  obj <- join_layers_if_needed(obj, verbose = verbose)
-  
   DefaultAssay(obj) <- "RNA"
-  
-  mt_pattern <- if (species == "human") "^MT-" else "^mt-"
-  rb_pattern <- if (species == "human") "^RP[SL]" else "^Rp[sl]"
-  hb_pattern <- if (species == "human") "^HB[^(P)]" else "^Hb[^(p)]"
-  
-  if (verbose) message("Calculating percent.mt / percent.rb / percent.hb")
-  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = mt_pattern)
-  obj[["percent.rb"]] <- PercentageFeatureSet(obj, pattern = rb_pattern)
-  obj[["percent.hb"]] <- PercentageFeatureSet(obj, pattern = hb_pattern)
-  
-  if (do_cellcycle) {
-    if (verbose) message("Cell cycle scoring (NormalizeData -> CellCycleScoring)")
-    obj <- NormalizeData(obj, verbose = FALSE)
-    
-    # Use updated cell cycle genes if available
-    s.genes <- Seurat::cc.genes.updated.2019$s.genes
-    g2m.genes <- Seurat::cc.genes.updated.2019$g2m.genes
+
+  if (is.null(mt_pattern)) mt_pattern <- if (species == "human") "^MT-" else "^mt-"
+  if (is.null(rb_pattern)) rb_pattern <- if (species == "human") "^RP[SL]" else "^Rp[sl]"
+  if (is.null(hb_pattern)) hb_pattern <- if (species == "human") "^HB[^(P)]" else "^Hb[^(p)]"
+
+  md <- obj@meta.data
+
+  # Ensure basic QC columns exist (these are metadata-only)
+  if (force_recalc || !("percent.mt" %in% colnames(md))) {
+    obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = mt_pattern)
+  }
+  if (force_recalc || !("percent.rb" %in% colnames(md))) {
+    obj[["percent.rb"]] <- PercentageFeatureSet(obj, pattern = rb_pattern)
+  }
+  if (force_recalc || !("percent.hb" %in% colnames(md))) {
+    obj[["percent.hb"]] <- PercentageFeatureSet(obj, pattern = hb_pattern)
+  }
+
+  # Cell cycle scoring using a temporary object; only copy scores back to metadata
+  if (isTRUE(do_cellcycle)) {
+    if (verbose) message("CellCycleScoring on a temporary object; only metadata will be written back.")
+
+    tmp <- obj
+
+    # Make tmp compatible with Seurat v5 layers
+    if (requireNamespace("SeuratObject", quietly = TRUE) && SeuratObject::Version(tmp) >= "5.0") {
+      tmp <- JoinLayers(tmp)
+    }
+
+    # Create normalized data in tmp only
+    tmp <- NormalizeData(tmp, verbose = FALSE)
+
+    # Prepare gene lists
+    s.genes <- Seurat::cc.genes$s.genes
+    g2m.genes <- Seurat::cc.genes$g2m.genes
     if (species != "human") {
       s.genes <- stringr::str_to_title(s.genes)
       g2m.genes <- stringr::str_to_title(g2m.genes)
     }
-    s.genes <- intersect(s.genes, rownames(obj))
-    g2m.genes <- intersect(g2m.genes, rownames(obj))
-    
-    if (length(s.genes) > 10 && length(g2m.genes) > 10) {
-      obj <- CellCycleScoring(obj, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
-    } else {
-      if (verbose) message("Cell cycle genes not found enough; skip CellCycleScoring")
+
+    s.genes <- intersect(s.genes, rownames(tmp))
+    g2m.genes <- intersect(g2m.genes, rownames(tmp))
+
+    if (length(s.genes) < 10 || length(g2m.genes) < 10) {
+      warning("Too few matched cell cycle genes; writing default Phase/S.Score/G2M.Score.")
       obj$S.Score <- 0
       obj$G2M.Score <- 0
       obj$Phase <- "Unknown"
+    } else {
+      tmp <- CellCycleScoring(tmp, s.features = s.genes, g2m.features = g2m.genes, set.ident = FALSE)
+
+      # Copy back by cell names (metadata only)
+      common_cells <- intersect(Cells(obj), Cells(tmp))
+      obj@meta.data[common_cells, "S.Score"] <- tmp@meta.data[common_cells, "S.Score", drop = TRUE]
+      obj@meta.data[common_cells, "G2M.Score"] <- tmp@meta.data[common_cells, "G2M.Score", drop = TRUE]
+      obj@meta.data[common_cells, "Phase"] <- tmp@meta.data[common_cells, "Phase", drop = TRUE]
     }
+
+    rm(tmp)
+    invisible(gc())
   }
-  
+
   obj
 }
+
+
 write_qc_report <- function(obj, out_dir, group_col = NULL) {
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
