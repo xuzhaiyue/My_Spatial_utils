@@ -339,41 +339,80 @@ filter_singlets <- function(obj, keep_unsure = TRUE) {
   subset(obj, cells = cells_keep)
 }
 
+export_mtx_bundle <- function(obj,
+                              out_dir,
+                              assay = "RNA",
+                              layer = "counts",
+                              join_layers = TRUE,
+                              write_gz = FALSE) {
+  stopifnot(inherits(obj, "Seurat"))
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-export_mtx_bundle <- function(obj, out_dir, assay = "RNA", layer = "counts") {
-  ensure_dirs(out_dir)
   DefaultAssay(obj) <- assay
-  
-  if ("SeuratObject" %in% loadedNamespaces()) {
-    v <- as.character(utils::packageVersion("Seurat"))
-  } else {
-    v <- "unknown"
+
+  obj_use <- obj
+
+  is_v5 <- FALSE
+  if (requireNamespace("SeuratObject", quietly = TRUE)) {
+    is_v5 <- SeuratObject::Version(obj_use) >= "5.0"
   }
-  
-  if (utils::packageVersion("Seurat") >= "5.0.0") {
-    obj <- JoinLayers(obj)
-    mat <- LayerData(obj, assay = assay, layer = layer)
-  } else {
-    mat <- GetAssayData(obj, assay = assay, slot = "counts")
+
+  if (is_v5 && join_layers) {
+    obj_use <- JoinLayers(obj_use)
   }
-  
-  if (!inherits(mat, "dgCMatrix")) mat <- as(mat, "dgCMatrix")
-  
-  Matrix::writeMM(mat, file = file.path(out_dir, "matrix.mtx"))
-  
+
+  if (is_v5) {
+    mat <- SeuratObject::LayerData(obj_use, assay = assay, layer = layer)
+  } else {
+    slot_use <- if (layer == "counts") "counts" else "data"
+    mat <- Seurat::GetAssayData(obj_use, assay = assay, slot = slot_use)
+  }
+
+  if (!inherits(mat, "dgCMatrix")) {
+    mat <- as(mat, "dgCMatrix")
+  }
+
+  mtx_path <- file.path(out_dir, "matrix.mtx")
+  feat_path <- file.path(out_dir, "features.tsv")
+  bc_path <- file.path(out_dir, "barcodes.tsv")
+  meta_path <- file.path(out_dir, "metadata.csv")
+
+  Matrix::writeMM(mat, file = mtx_path)
+
   write.table(
-    data.frame(rownames(mat), rownames(mat)),
-    file = file.path(out_dir, "features.tsv"),
+    data.frame(gene_id = rownames(mat), gene_name = rownames(mat)),
+    file = feat_path,
     row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t"
   )
-  
+
   write.table(
     colnames(mat),
-    file = file.path(out_dir, "barcodes.tsv"),
+    file = bc_path,
     row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t"
   )
-  
-  write.csv(obj@meta.data, file = file.path(out_dir, "metadata.csv"), row.names = TRUE)
-  
+
+  meta_out <- obj_use@meta.data
+  meta_out <- meta_out[colnames(mat), , drop = FALSE]
+  write.csv(meta_out, file = meta_path, row.names = TRUE)
+
+  if (isTRUE(write_gz)) {
+    gz1 <- gzfile(paste0(mtx_path, ".gz"), "wb"); close(gz1)
+    gz2 <- gzfile(paste0(feat_path, ".gz"), "wb"); close(gz2)
+    gz3 <- gzfile(paste0(bc_path, ".gz"), "wb"); close(gz3)
+
+    con_in <- file(mtx_path, "rb"); con_out <- gzfile(paste0(mtx_path, ".gz"), "wb")
+    writeBin(readBin(con_in, what = "raw", n = 1e9), con_out); close(con_in); close(con_out)
+    file.remove(mtx_path)
+
+    con_in <- file(feat_path, "rb"); con_out <- gzfile(paste0(feat_path, ".gz"), "wb")
+    writeBin(readBin(con_in, what = "raw", n = 1e9), con_out); close(con_in); close(con_out)
+    file.remove(feat_path)
+
+    con_in <- file(bc_path, "rb"); con_out <- gzfile(paste0(bc_path, ".gz"), "wb")
+    writeBin(readBin(con_in, what = "raw", n = 1e9), con_out); close(con_in); close(con_out)
+    file.remove(bc_path)
+  }
+
   invisible(TRUE)
 }
+
