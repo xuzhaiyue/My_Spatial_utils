@@ -145,7 +145,6 @@ run_doubletfinder_one <- function(sub,
   stopifnot(inherits(sub, "Seurat"))
   DefaultAssay(sub) <- "RNA"
   
-  # Minimal preprocessing required by DoubletFinder
   sub <- NormalizeData(sub, verbose = FALSE)
   sub <- FindVariableFeatures(sub, verbose = FALSE)
   sub <- ScaleData(sub, verbose = FALSE)
@@ -153,7 +152,6 @@ run_doubletfinder_one <- function(sub,
   sub <- FindNeighbors(sub, dims = 1:npcs, verbose = FALSE)
   sub <- FindClusters(sub, resolution = resolution, verbose = FALSE)
   
-  # Parameter sweep (compat across versions)
   if (exists("paramSweep_v3", where = asNamespace("DoubletFinder"), inherits = FALSE)) {
     sweep.res <- DoubletFinder::paramSweep_v3(sub, PCs = 1:npcs, sct = FALSE)
   } else {
@@ -168,20 +166,20 @@ run_doubletfinder_one <- function(sub,
   
   n_cells <- ncol(sub)
   nExp <- round(expected_rate * n_cells)
-  
   homotypic.prop <- DoubletFinder::modelHomotypic(sub$seurat_clusters)
   nExp.adj <- round(nExp * (1 - homotypic.prop))
   if (verbose) message("nExp = ", nExp, " ; homotypic.prop = ", round(homotypic.prop, 3), " ; nExp.adj = ", nExp.adj)
   
-  sub <- DoubletFinder::doubletFinder(sub,
-                                      PCs = 1:npcs,
-                                      pN = 0.25,
-                                      pK = best_pK,
-                                      nExp = nExp.adj,
-                                      reuse.pANN = FALSE,
-                                      sct = FALSE)
+  sub <- DoubletFinder::doubletFinder(
+    seu = sub,
+    PCs = 1:npcs,
+    pN = 0.25,
+    pK = best_pK,
+    nExp = nExp.adj,
+    reuse.pANN = NULL,
+    sct = FALSE
+  )
   
-  # Extract DF columns (names vary by run)
   meta_cols <- colnames(sub@meta.data)
   pANN_col <- grep("^pANN", meta_cols, value = TRUE)
   cls_col  <- grep("^DF.classifications", meta_cols, value = TRUE)
@@ -190,14 +188,15 @@ run_doubletfinder_one <- function(sub,
     stop("DoubletFinder output columns not found. pANN_col=", paste(pANN_col, collapse=","), " cls_col=", paste(cls_col, collapse=","))
   }
   
-  sub$DF_pANN <- sub@meta.data[[pANN_col]]
-  sub$DF_class <- sub@meta.data[[cls_col]]
+  sub$DF_pANN <- as.numeric(sub@meta.data[[pANN_col]])
+  sub$DF_class <- as.character(sub@meta.data[[cls_col]])
   
   sub@meta.data[[pANN_col]] <- NULL
   sub@meta.data[[cls_col]] <- NULL
   
   sub
 }
+
 
 run_doubletfinder_by_sample <- function(obj,
                                         sample_col = "GSM_ID",
@@ -208,12 +207,15 @@ run_doubletfinder_by_sample <- function(obj,
                                         verbose = TRUE) {
   stopifnot(inherits(obj, "Seurat"))
   if (!sample_col %in% colnames(obj@meta.data)) stop("sample_col not found: ", sample_col)
-  
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   
-  # Initialize result columns
+  if (packageVersion("SeuratObject") >= "5.0.0") {
+    if (verbose) message("Joining layers globally...")
+    obj <- JoinLayers(obj)
+  }
+  
   obj$DF_class <- NA_character_
-  obj$DF_pANN <- NA_real_
+  obj$DF_pANN  <- NA_real_
   
   samples <- sort(unique(obj@meta.data[[sample_col]]))
   
@@ -226,7 +228,7 @@ run_doubletfinder_by_sample <- function(obj,
     if (ncol(sub) < min_cells) {
       if (verbose) message("Skip (too small): ", sid, " n=", ncol(sub))
       obj@meta.data[cells_use, "DF_class"] <- "Singlet"
-      obj@meta.data[cells_use, "DF_pANN"] <- 0
+      obj@meta.data[cells_use, "DF_pANN"]  <- 0
       next
     }
     
@@ -241,10 +243,12 @@ run_doubletfinder_by_sample <- function(obj,
     )
     
     obj@meta.data[colnames(sub2), "DF_class"] <- sub2$DF_class
-    obj@meta.data[colnames(sub2), "DF_pANN"] <- sub2$DF_pANN
+    obj@meta.data[colnames(sub2), "DF_pANN"]  <- sub2$DF_pANN
     
     tab <- as.data.table(table(sub2$DF_class, useNA = "ifany"))
     fwrite(tab, file.path(out_dir, paste0("doublet_table_", sid, ".tsv")), sep = "\t")
+    
+    rm(sub, sub2); gc()
   }
   
   obj
