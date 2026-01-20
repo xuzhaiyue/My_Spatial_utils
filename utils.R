@@ -144,32 +144,40 @@ run_doubletfinder_one <- function(sub,
                                   verbose = TRUE) {
   stopifnot(inherits(sub, "Seurat"))
   DefaultAssay(sub) <- "RNA"
-  
+
   sub <- NormalizeData(sub, verbose = FALSE)
   sub <- FindVariableFeatures(sub, verbose = FALSE)
   sub <- ScaleData(sub, verbose = FALSE)
   sub <- RunPCA(sub, npcs = npcs, verbose = FALSE)
   sub <- FindNeighbors(sub, dims = 1:npcs, verbose = FALSE)
   sub <- FindClusters(sub, resolution = resolution, verbose = FALSE)
-  
-  if (exists("paramSweep_v3", where = asNamespace("DoubletFinder"), inherits = FALSE)) {
-    sweep.res <- DoubletFinder::paramSweep_v3(sub, PCs = 1:npcs, sct = FALSE)
+
+  df_ns <- asNamespace("DoubletFinder")
+
+  sweep_fun <- NULL
+  if (exists("paramSweep_v3", where = df_ns, inherits = FALSE)) {
+    sweep_fun <- get("paramSweep_v3", envir = df_ns)
+  } else if (exists("paramSweep", where = df_ns, inherits = FALSE)) {
+    sweep_fun <- get("paramSweep", envir = df_ns)
   } else {
-    sweep.res <- DoubletFinder::paramSweep(sub, PCs = 1:npcs, sct = FALSE)
+    stop("DoubletFinder paramSweep function not found in your installed package.")
   }
+
+  sweep.res <- sweep_fun(sub, PCs = 1:npcs, sct = FALSE)
+
   sweep.stats <- DoubletFinder::summarizeSweep(sweep.res, GT = FALSE)
   bcmvn <- DoubletFinder::find.pK(sweep.stats)
-  
+
   best_pK <- bcmvn$pK[which.max(bcmvn$BCmetric)]
   best_pK <- as.numeric(as.character(best_pK))
   if (verbose) message("Best pK = ", best_pK)
-  
+
   n_cells <- ncol(sub)
   nExp <- round(expected_rate * n_cells)
   homotypic.prop <- DoubletFinder::modelHomotypic(sub$seurat_clusters)
   nExp.adj <- round(nExp * (1 - homotypic.prop))
   if (verbose) message("nExp = ", nExp, " ; homotypic.prop = ", round(homotypic.prop, 3), " ; nExp.adj = ", nExp.adj)
-  
+
   sub <- DoubletFinder::doubletFinder(
     seu = sub,
     PCs = 1:npcs,
@@ -179,80 +187,146 @@ run_doubletfinder_one <- function(sub,
     reuse.pANN = NULL,
     sct = FALSE
   )
-  
+
   meta_cols <- colnames(sub@meta.data)
   pANN_col <- grep("^pANN", meta_cols, value = TRUE)
   cls_col  <- grep("^DF.classifications", meta_cols, value = TRUE)
-  
+
   if (length(pANN_col) != 1 || length(cls_col) != 1) {
     stop("DoubletFinder output columns not found. pANN_col=", paste(pANN_col, collapse=","), " cls_col=", paste(cls_col, collapse=","))
   }
-  
+
   sub$DF_pANN <- as.numeric(sub@meta.data[[pANN_col]])
   sub$DF_class <- as.character(sub@meta.data[[cls_col]])
-  
+
   sub@meta.data[[pANN_col]] <- NULL
   sub@meta.data[[cls_col]] <- NULL
-  
+
   sub
 }
-
-
 run_doubletfinder_by_sample <- function(obj,
                                         sample_col = "GSM_ID",
                                         out_dir,
                                         npcs = 20,
                                         expected_rate = 0.075,
                                         min_cells = 200,
-                                        verbose = TRUE) {
+                                        verbose = TRUE,
+                                        write_global_table = TRUE) {
   stopifnot(inherits(obj, "Seurat"))
-  if (!sample_col %in% colnames(obj@meta.data)) stop("sample_col not found: ", sample_col)
+  if (!sample_col %in% colnames(obj@meta.data)) stop(paste0("sample_col not found: ", sample_col))
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-  
-  if (packageVersion("SeuratObject") >= "5.0.0") {
-    if (verbose) message("Joining layers globally...")
-    obj <- JoinLayers(obj)
-  }
-  
+
+  cell_dir <- file.path(out_dir, "cell_level")
+  sum_dir  <- file.path(out_dir, "summary")
+  dir.create(cell_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(sum_dir,  recursive = TRUE, showWarnings = FALSE)
+
+  if (verbose) message("Joining layers globally...")
+  obj <- JoinLayers(obj)
+
   obj$DF_class <- NA_character_
   obj$DF_pANN  <- NA_real_
-  
+
+  global_file <- file.path(cell_dir, "doublet_cells_all.tsv")
+  if (write_global_table) {
+    if (file.exists(global_file)) file.remove(global_file)
+  }
+
   samples <- sort(unique(obj@meta.data[[sample_col]]))
-  
+
   for (sid in samples) {
     if (verbose) message("Running DoubletFinder: ", sid)
-    
+
     cells_use <- rownames(obj@meta.data)[obj@meta.data[[sample_col]] == sid]
-    sub <- subset(obj, cells = cells_use)
-    
-    if (ncol(sub) < min_cells) {
-      if (verbose) message("Skip (too small): ", sid, " n=", ncol(sub))
+
+    if (length(cells_use) < min_cells) {
+      if (verbose) message("Skip (too small): ", sid, " n=", length(cells_use))
+
       obj@meta.data[cells_use, "DF_class"] <- "Singlet"
       obj@meta.data[cells_use, "DF_pANN"]  <- 0
+
+      res_df <- data.frame(
+        Barcode = cells_use,
+        sample_id = sid,
+        DF_class = "Singlet",
+        DF_pANN = 0,
+        nCount_RNA = obj@meta.data[cells_use, "nCount_RNA", drop = TRUE],
+        nFeature_RNA = obj@meta.data[cells_use, "nFeature_RNA", drop = TRUE],
+        percent.mt = if ("percent.mt" %in% colnames(obj@meta.data)) obj@meta.data[cells_use, "percent.mt", drop = TRUE] else NA_real_,
+        stringsAsFactors = FALSE
+      )
+
+      out_one <- file.path(cell_dir, paste0("doublet_cells_", sid, ".tsv.gz"))
+      data.table::fwrite(res_df, out_one, sep = "\t")
+
+      if (write_global_table) {
+        data.table::fwrite(res_df, global_file, sep = "\t", append = file.exists(global_file))
+      }
+
+      tab <- as.data.frame(table(res_df$DF_class, useNA = "ifany"))
+      colnames(tab) <- c("DF_class", "nCells")
+      tab$sample_id <- sid
+      tab$expected_rate <- expected_rate
+      data.table::fwrite(tab, file.path(sum_dir, paste0("doublet_table_", sid, ".tsv")), sep = "\t")
+
+      rm(res_df, tab); gc()
       next
     }
-    
+
+    sub <- subset(obj, cells = cells_use)
+
     sub2 <- tryCatch(
       run_doubletfinder_one(sub, npcs = npcs, expected_rate = expected_rate, verbose = verbose),
       error = function(e) {
         message("DoubletFinder failed for ", sid, " : ", e$message)
         sub$DF_class <- "Unsure"
-        sub$DF_pANN <- NA_real_
+        sub$DF_pANN  <- NA_real_
         sub
       }
     )
-    
-    obj@meta.data[colnames(sub2), "DF_class"] <- sub2$DF_class
-    obj@meta.data[colnames(sub2), "DF_pANN"]  <- sub2$DF_pANN
-    
-    tab <- as.data.table(table(sub2$DF_class, useNA = "ifany"))
-    fwrite(tab, file.path(out_dir, paste0("doublet_table_", sid, ".tsv")), sep = "\t")
-    
-    rm(sub, sub2); gc()
+
+    cells_back <- Cells(sub2)
+
+    obj@meta.data[cells_back, "DF_class"] <- sub2$DF_class
+    obj@meta.data[cells_back, "DF_pANN"]  <- sub2$DF_pANN
+
+    res_df <- data.frame(
+      Barcode = cells_back,
+      sample_id = sid,
+      DF_class = as.character(sub2$DF_class),
+      DF_pANN = as.numeric(sub2$DF_pANN),
+      nCount_RNA = sub2@meta.data[cells_back, "nCount_RNA", drop = TRUE],
+      nFeature_RNA = sub2@meta.data[cells_back, "nFeature_RNA", drop = TRUE],
+      percent.mt = if ("percent.mt" %in% colnames(sub2@meta.data)) sub2@meta.data[cells_back, "percent.mt", drop = TRUE] else NA_real_,
+      seurat_clusters = if ("seurat_clusters" %in% colnames(sub2@meta.data)) as.character(sub2@meta.data[cells_back, "seurat_clusters", drop = TRUE]) else NA_character_,
+      stringsAsFactors = FALSE
+    )
+
+    out_one <- file.path(cell_dir, paste0("doublet_cells_", sid, ".tsv.gz"))
+    data.table::fwrite(res_df, out_one, sep = "\t")
+
+    if (write_global_table) {
+      data.table::fwrite(res_df, global_file, sep = "\t", append = file.exists(global_file))
+    }
+
+    tab <- as.data.frame(table(res_df$DF_class, useNA = "ifany"))
+    colnames(tab) <- c("DF_class", "nCells")
+    tab$sample_id <- sid
+    tab$expected_rate <- expected_rate
+    tab$nDoublet <- sum(res_df$DF_class == "Doublet", na.rm = TRUE)
+    tab$doublet_frac <- tab$nDoublet / sum(tab$nCells)
+    data.table::fwrite(tab, file.path(sum_dir, paste0("doublet_table_", sid, ".tsv")), sep = "\t")
+
+    rm(sub, sub2, res_df, tab); gc()
   }
-  
+
+  if (verbose) {
+    message("Done. DF columns in meta.data: ", paste(grep("^DF_", colnames(obj@meta.data), value = TRUE), collapse = ","))
+  }
+
   obj
 }
+
 
 filter_singlets <- function(obj, keep_unsure = TRUE) {
   stopifnot(inherits(obj, "Seurat"))
