@@ -65,7 +65,76 @@ calc_qc_metrics <- function(obj, species = "human", do_cellcycle = TRUE, verbose
   
   obj
 }
+write_qc_report <- function(obj, out_dir, group_col = NULL) {
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
+  if (is.null(group_col)) {
+    if ("Sample_Name" %in% colnames(obj@meta.data)) {
+      group_col <- "Sample_Name"
+    } else if ("GSM_ID" %in% colnames(obj@meta.data)) {
+      group_col <- "GSM_ID"
+    } else if ("orig.ident" %in% colnames(obj@meta.data)) {
+      group_col <- "orig.ident"
+    }
+  }
+
+  if (!is.null(group_col) && !group_col %in% colnames(obj@meta.data)) {
+    group_col <- NULL
+  }
+
+  n_groups <- 1
+  if (!is.null(group_col)) {
+    n_groups <- length(unique(obj@meta.data[[group_col]]))
+  }
+
+  calc_width <- 5 + (n_groups * 0.4)
+  calc_width <- max(8, min(calc_width, 50))
+
+  features_to_plot <- c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb", "percent.hb")
+  features_to_plot <- intersect(features_to_plot, colnames(obj@meta.data))
+
+  pdf(file.path(out_dir, "qc_violin.pdf"), width = calc_width, height = 8)
+  
+  if (!is.null(group_col)) {
+    p <- VlnPlot(obj, features = features_to_plot,
+                 group.by = group_col, 
+                 pt.size = 0, 
+                 ncol = length(features_to_plot))
+    p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + NoLegend()
+    print(p)
+  } else {
+    print(VlnPlot(obj, features = features_to_plot, pt.size = 0, ncol = length(features_to_plot)))
+  }
+  dev.off()
+
+  scatter_width <- max(10, calc_width * 0.8)
+  pdf(file.path(out_dir, "qc_scatter.pdf"), width = scatter_width, height = 6)
+  
+  group_param <- if(!is.null(group_col)) group_col else NULL
+  p1 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = group_param)
+  p2 <- FeatureScatter(obj, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = group_param)
+  print(p1 + p2)
+  dev.off()
+
+  if (!is.null(group_col)) {
+    tab <- obj@meta.data %>%
+      group_by(across(all_of(group_col))) %>%
+      summarise(
+        nCells = n(),
+        across(all_of(features_to_plot), median, .names = "med_{.col}"),
+        .groups = "drop"
+      )
+  } else {
+    tab <- obj@meta.data %>%
+      summarise(
+        nCells = n(),
+        across(all_of(features_to_plot), median, .names = "med_{.col}")
+      )
+  }
+
+  fwrite(as.data.table(tab), file.path(out_dir, "qc_summary.tsv"), sep = "\t")
+  invisible(TRUE)
+}
 run_doubletfinder_one <- function(sub,
                                   npcs = 20,
                                   expected_rate = 0.075,
