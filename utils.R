@@ -3,6 +3,8 @@ suppressPackageStartupMessages({
   library(Matrix)
   library(DoubletFinder)
   library(data.table)
+  library(Seurat)
+  library(ggplot2)
 })
 
 join_layers_if_needed <- function(obj, verbose = TRUE) {
