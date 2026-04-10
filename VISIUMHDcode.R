@@ -3088,7 +3088,7 @@ PlotSpatialDistribution_bar_he <- function(
       stop("Unknown palette: ", palette)
     }
   } else if (is.character(palette)) {
-    plot_colors <- palette; names(plot_colors) <- levs
+    plot_colors <- palette
   } else if (is.function(palette)) {
     tmp <- palette(); plot_colors <- rep(tmp, length.out=length(levs)); names(plot_colors) <- levs
   } else stop("Invalid 'palette'.")
