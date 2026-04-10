@@ -1774,19 +1774,12 @@ PlotSpatialDistribution_pdac <- function(
 
 
 
-
-
-suppressPackageStartupMessages({
-  library(ggplot2)
-})
-
-`%||%` <- function(a,b) if (!is.null(a)) a else b
-
 PlotExpressionV2 <- function(
     object,                        # Seurat 或 data.frame
     feature,                       # 基因 或 meta.data 里的分数列名
     assay        = "Spatial",
-    slot         = "data",
+    slot         = "data",         # backward compatibility
+    layer        = NULL,           # Seurat v5 preferred
     source       = c("auto","meta","matrix"),
     # 显示样式
     shape        = c("square","circle"),
@@ -1812,6 +1805,12 @@ PlotExpressionV2 <- function(
   spot_size <- match.arg(spot_size)
   method    <- match.arg(method)
   area_unit <- match.arg(area_unit)
+
+  # Seurat v5 compatibility: prefer layer, keep slot for backward compatibility
+  if (is.null(layer)) layer <- slot
+
+  # local null-coalescing helper
+  `%||%` <- function(a, b) if (!is.null(a)) a else b
   
   # ---- 1) 取绘图数据 + 尺子 ----
   if (inherits(object, "Seurat")) {
@@ -1819,10 +1818,14 @@ PlotExpressionV2 <- function(
     
     # 坐标（优先 lowres）
     if (all(c("imagecol_scaled","imagerow_scaled") %in% colnames(md))) {
-      x <- md$imagecol_scaled; y <- md$imagerow_scaled
+      x <- md$imagecol_scaled
+      y <- md$imagerow_scaled
     } else if (all(c("imagecol","imagerow") %in% colnames(md))) {
-      x <- md$imagecol; y <- md$imagerow
-    } else stop("meta.data 中找不到低清或原始坐标：imagecol(_scaled)/imagerow(_scaled).")
+      x <- md$imagecol
+      y <- md$imagerow
+    } else {
+      stop("meta.data 中找不到低清或原始坐标：imagecol(_scaled)/imagerow(_scaled).")
+    }
     
     plot_df <- data.frame(
       barcode = rownames(md),
@@ -1836,12 +1839,12 @@ PlotExpressionV2 <- function(
       object@misc$microns_per_pixel %||%
       object@misc$spatial_scales$microns_per_pixel %||%
       object@misc$scales$microns_per_pixel %||%
-      tryCatch(Images(object)[[1]]@scale.factors$microns_per_pixel, error=function(e) NULL)
+      tryCatch(Images(object)[[1]]@scale.factors$microns_per_pixel, error = function(e) NULL)
     
     s_low <- scale_lowres %||%
       object@misc$spatial_scales$tissue_lowres_scalef %||%
       object@misc$scales$tissue_lowres_scalef %||%
-      tryCatch(Images(object)[[1]]@scale.factors$tissue_lowres_scalef, error=function(e) NULL)
+      tryCatch(Images(object)[[1]]@scale.factors$tissue_lowres_scalef, error = function(e) NULL)
     
     if (is.null(bin_um)) {
       bin_um <- object@misc$bin_um %||%
@@ -1854,74 +1857,97 @@ PlotExpressionV2 <- function(
     # 构建 feature 向量（自动判定：meta优先）
     if (source == "auto") {
       if (feature %in% colnames(md)) {
-        val <- as.numeric(md[[feature]]); src <- "meta"
+        val <- as.numeric(md[[feature]])
+        src <- "meta"
       } else {
         DefaultAssay(object) <- assay
-        M <- Seurat::GetAssayData(object, assay=assay, slot=slot)
+        M <- Seurat::GetAssayData(object, assay = assay, layer = layer)
         if (feature %in% rownames(M)) {
           val <- as.numeric(M[feature, colnames(object)])
           src <- "matrix"
         } else {
-          stop("在 meta.data 和 ", assay,"/",slot," 都找不到：", feature)
+          stop("在 meta.data 和 ", assay, "/", layer, " 都找不到：", feature)
         }
       }
     } else if (source == "meta") {
       stopifnot(feature %in% colnames(md))
-      val <- as.numeric(md[[feature]]); src <- "meta"
+      val <- as.numeric(md[[feature]])
+      src <- "meta"
     } else { # source == "matrix"
       DefaultAssay(object) <- assay
-      M <- Seurat::GetAssayData(object, assay=assay, slot=slot)
+      M <- Seurat::GetAssayData(object, assay = assay, layer = layer)
       stopifnot(feature %in% rownames(M))
-      val <- as.numeric(M[feature, colnames(object)]); src <- "matrix"
+      val <- as.numeric(M[feature, colnames(object)])
+      src <- "matrix"
     }
     
     # 把可能有用的列带进 df（area_um2 等）
-    if (!is.null(area_col) && area_col %in% colnames(md))
+    if (!is.null(area_col) && area_col %in% colnames(md)) {
       plot_df[[area_col]] <- md[[area_col]]
+    }
     
   } else if (is.data.frame(object)) {
     plot_df <- object
-    if (!all(c("imagecol_scaled","imagerow_scaled") %in% colnames(plot_df)))
+    if (!all(c("imagecol_scaled","imagerow_scaled") %in% colnames(plot_df))) {
       stop("data.frame 需要包含列：imagecol_scaled, imagerow_scaled")
+    }
+    
     # 从 df 取 feature 列，若没有再报错（此分支不自动查 assay）
     if (feature %in% colnames(plot_df)) {
-      val <- as.numeric(plot_df[[feature]]); src <- "meta"
+      val <- as.numeric(plot_df[[feature]])
+      src <- "meta"
     } else {
       stop("传入的是 data.frame：请先把 '", feature, "' 列加入其中（或传 Seurat 以便从矩阵读取）。")
     }
+    
     # 尺子
-    mpp  <- microns_per_pixel
-    s_low<- scale_lowres
-    if (is.null(mpp) || is.null(s_low))
+    mpp   <- microns_per_pixel
+    s_low <- scale_lowres
+    if (is.null(mpp) || is.null(s_low)) {
       stop("data.frame 模式需要提供 microns_per_pixel 与 scale_lowres（标量或列名）。")
+    }
   } else {
     stop("object 必须是 Seurat 或 data.frame")
   }
   
   # ---- 2) 可选：KNN 平滑 ----
   if (knn_smooth) {
-    if (!requireNamespace("FNN", quietly = TRUE)) stop("需要 FNN 包：install.packages('FNN')")
+    if (!requireNamespace("FNN", quietly = TRUE)) {
+      stop("需要 FNN 包：install.packages('FNN')")
+    }
+    
     coords <- cbind(plot_df$imagecol_scaled, plot_df$imagerow_scaled)
-    nn <- FNN::get.knn(coords, k = min(k, nrow(coords)-1))
+    nn <- FNN::get.knn(coords, k = min(k, nrow(coords) - 1))
+    
     if (is.null(sigma) && method == "gaussian") {
-      sigma <- stats::median(nn$nn.dist[,1], na.rm=TRUE)
+      sigma <- stats::median(nn$nn.dist[, 1], na.rm = TRUE)
       if (!is.finite(sigma) || sigma <= 0) sigma <- 1
     }
+    
     # 权重
     dist_mat <- cbind(0, nn$nn.dist)
     if (method == "gaussian") {
-      Wrow <- exp(-(dist_mat^2)/(2*sigma^2))
+      Wrow <- exp(-(dist_mat^2) / (2 * sigma^2))
     } else {
       Wrow <- matrix(1, nrow(dist_mat), ncol(dist_mat))
     }
     Wrow <- Wrow / pmax(rowSums(Wrow), 1e-12)
+    
     # 稀疏乘法
     n <- nrow(coords)
     idx_rows <- as.vector(row(Wrow))
     idx_cols <- as.vector(cbind(matrix(seq_len(n), n, 1), nn$nn.index))
-    W <- Matrix::sparseMatrix(i=idx_rows, j=idx_cols, x=as.vector(Wrow), dims=c(n,n))
+    W <- Matrix::sparseMatrix(
+      i = idx_rows,
+      j = idx_cols,
+      x = as.vector(Wrow),
+      dims = c(n, n)
+    )
     val <- as.numeric(W %*% val)
-    if (is.null(legend_title)) legend_title <- paste0(feature, if (method=="gaussian") "_wknn" else "_knn", k)
+    
+    if (is.null(legend_title)) {
+      legend_title <- paste0(feature, if (method == "gaussian") "_wknn" else "_knn", k)
+    }
   }
   
   # ---- 3) 组装绘图 df ----
@@ -1931,50 +1957,69 @@ PlotExpressionV2 <- function(
   # ---- 4) 真实大小 or 符号大小 ----
   flip_y <- function(y) -y
   
-  use_real_tiles <- (shape=="square" && spot_size=="auto" &&
-                       ( (!is.null(area_col) && area_col %in% names(plot_df)) || !is.null(bin_um) ) )
+  use_real_tiles <- (
+    shape == "square" &&
+      spot_size == "auto" &&
+      (((!is.null(area_col) && area_col %in% names(plot_df))) || !is.null(bin_um))
+  )
   
   if (use_real_tiles) {
     # 尺子向量化（既支持标量，也支持传列名）
-    if (is.character(mpp))  mpp_vec <- plot_df[[mpp]]  else mpp_vec <- rep(mpp,  nrow(plot_df))
-    if (is.character(s_low))sL_vec  <- plot_df[[s_low]] else sL_vec  <- rep(s_low, nrow(plot_df))
+    if (is.character(mpp)) {
+      mpp_vec <- plot_df[[mpp]]
+    } else {
+      mpp_vec <- rep(mpp, nrow(plot_df))
+    }
+    
+    if (is.character(s_low)) {
+      sL_vec <- plot_df[[s_low]]
+    } else {
+      sL_vec <- rep(s_low, nrow(plot_df))
+    }
     
     if (!is.null(area_col) && area_col %in% names(plot_df)) {
       # Cellbin：面积 -> 低清像素边长
-      if (area_unit=="um2") {
+      if (area_unit == "um2") {
         side <- sqrt(pmax(plot_df[[area_col]], 0)) * (sL_vec / mpp_vec)
       } else {
         side <- sqrt(pmax(plot_df[[area_col]], 0))
       }
     } else {
       # HD：固定 bin
-      if (is.null(bin_um)) stop("size='auto'：需要 area_col 或 bin_um。")
+      if (is.null(bin_um)) stop("spot_size='auto'：需要 area_col 或 bin_um。")
       side <- (bin_um / mpp_vec) * sL_vec
     }
     
-    cx <- plot_df$imagecol_scaled; cy <- flip_y(plot_df$imagerow_scaled)
-    plot_df$.xmin <- cx - 0.5*side; plot_df$.xmax <- cx + 0.5*side
-    plot_df$.ymin <- cy - 0.5*side; plot_df$.ymax <- cy + 0.5*side
+    cx <- plot_df$imagecol_scaled
+    cy <- flip_y(plot_df$imagerow_scaled)
+    plot_df$.xmin <- cx - 0.5 * side
+    plot_df$.xmax <- cx + 0.5 * side
+    plot_df$.ymin <- cy - 0.5 * side
+    plot_df$.ymax <- cy + 0.5 * side
     
-    p <- ggplot(plot_df, aes(xmin=.xmin, xmax=.xmax, ymin=.ymin, ymax=.ymax, fill=Expression)) +
+    p <- ggplot(
+      plot_df,
+      aes(xmin = .xmin, xmax = .xmax, ymin = .ymin, ymax = .ymax, fill = Expression)
+    ) +
       geom_rect(color = NA, ...) +
       scale_fill_gradientn(colors = colors, name = legend_title, na.value = "lightgrey")
     
   } else {
     # 符号大小（与坐标无关）
     have_scattermore <- requireNamespace("scattermore", quietly = TRUE)
-    if (shape=="circle") {
+    
+    if (shape == "circle") {
       if (have_scattermore) {
-        p <- ggplot(plot_df, aes(x=imagecol_scaled, y=flip_y(imagerow_scaled), color=Expression)) +
-          scattermore::geom_scattermore(pointsize = 2.5, pixels = c(2000,2000), ...) +
+        p <- ggplot(plot_df, aes(x = imagecol_scaled, y = flip_y(imagerow_scaled), color = Expression)) +
+          scattermore::geom_scattermore(pointsize = 2.5, pixels = c(2000, 2000), ...) +
           scale_color_gradientn(colors = colors, name = legend_title, na.value = "lightgrey")
       } else {
-        p <- ggplot(plot_df, aes(x=imagecol_scaled, y=flip_y(imagerow_scaled), color=Expression)) +
+        p <- ggplot(plot_df, aes(x = imagecol_scaled, y = flip_y(imagerow_scaled), color = Expression)) +
           geom_point(size = 2.5, shape = 16, stroke = 0, ...) +
           scale_color_gradientn(colors = colors, name = legend_title, na.value = "lightgrey")
       }
     } else {
-      p <- ggplot(plot_df, aes(x=imagecol_scaled, y=flip_y(imagerow_scaled), fill=Expression)) +
+      p <- ggplot(plot_df, aes(x = imagecol_scaled, y = flip_y(imagerow_scaled), fill = Expression)) +
         geom_point(shape = 22, size = 2.5, color = ggplot2::alpha("black", 0), stroke = 0.25, ...) +
         scale_fill_gradientn(colors = colors, name = legend_title, na.value = "lightgrey")
     }
@@ -1982,15 +2027,14 @@ PlotExpressionV2 <- function(
   
   p +
     coord_fixed() +
-    xlab("") + ylab("") +
+    xlab("") +
+    ylab("") +
     theme_void() +
     theme(
-      plot.title      = element_text(hjust=0.5, face="bold"),
+      plot.title = element_text(hjust = 0.5, face = "bold"),
       legend.position = "right"
     )
 }
-
-
 
 
 
